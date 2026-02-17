@@ -85,6 +85,16 @@ class TerminalContainerView: NSView {
     }
 
     override var acceptsFirstResponder: Bool { false }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override func makeBackingLayer() -> CALayer {
+        let layer = super.makeBackingLayer()
+        layer.masksToBounds = true
+        return layer
+    }
 }
 
 // MARK: - Terminal Wrapper
@@ -138,7 +148,8 @@ struct SessionTerminalView: NSViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalContainerView, context: Context) -> CGSize? {
-        nil // Accept proposed size — fill available space
+        // Return the exact proposed size so the terminal never exceeds its allocated space
+        CGSize(width: proposal.width ?? 400, height: proposal.height ?? 300)
     }
 
     private func installTerminal(_ terminal: LocalProcessTerminalView, in container: NSView) {
@@ -156,7 +167,18 @@ struct SessionTerminalView: NSViewRepresentable {
         }
 
         terminal.translatesAutoresizingMaskIntoConstraints = false
+        terminal.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        terminal.setContentHuggingPriority(.defaultLow, for: .vertical)
+        terminal.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        terminal.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+        // Hide SwiftTerm's legacy scrollbar
+        if let scroller = terminal.subviews.first(where: { $0 is NSScroller }) as? NSScroller {
+            scroller.isHidden = true
+        }
+
         container.addSubview(terminal)
+        terminal.layer?.masksToBounds = true
         NSLayoutConstraint.activate([
             terminal.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             terminal.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -338,6 +360,7 @@ private struct TerminalPanesView: View {
         if panes.count == 1 {
             // Single pane — no header, no divider
             SessionTerminalView(terminalView: panes[0].terminalView, isDark: isDark)
+                .clipped()
         } else {
             // Multiple panes with HSplitView
             HSplitView {
@@ -357,6 +380,7 @@ private struct TerminalPanesView: View {
                 isDark: isDark,
                 onTap: { session.focusedPaneId = pane.id }
             )
+            .clipped()
         }
         .frame(minWidth: 200)
     }

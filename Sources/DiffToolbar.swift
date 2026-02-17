@@ -6,8 +6,11 @@ struct DiffToolbar: View {
     var commentCount: Int = 0
     var sentCommentHistory: [SentCommentBatch] = []
     var onSendAllComments: (() -> Void)? = nil
+    var hasChanges: Bool = false
+    var onCommit: (() -> Void)? = nil
 
     @State private var showHistoryPopover = false
+    @State private var showNothingToCommit = false
 
     var body: some View {
         HStack {
@@ -16,6 +19,33 @@ struct DiffToolbar: View {
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
+
+            if let onCommit {
+                Button {
+                    if hasChanges {
+                        onCommit()
+                    } else {
+                        showNothingToCommit = true
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 11))
+                        Text("Commit")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(hasChanges ? .accentColor : nil)
+                .controlSize(.regular)
+                .popover(isPresented: $showNothingToCommit, arrowEdge: .bottom) {
+                    Text("Nothing to commit")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(12)
+                }
+            }
+
             Spacer()
 
             if !sentCommentHistory.isEmpty {

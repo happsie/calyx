@@ -17,6 +17,7 @@ struct SwiftAgentsApp: App {
                 .environment(sessionManager)
                 .environment(projectStore)
                 .environment(appSettings)
+                .environment(appDelegate)
                 .preferredColorScheme(appSettings.appearanceMode.colorScheme)
                 .onAppear {
                     appDelegate.sessionManager = sessionManager
@@ -39,8 +40,10 @@ struct SwiftAgentsApp: App {
     }
 }
 
+@Observable
 class AppDelegate: NSObject, NSApplicationDelegate {
     var sessionManager: SessionManager?
+    var isQuitting = false
     private var saveTimer: Timer?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -53,6 +56,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         saveTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.sessionManager?.save()
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let sessionManager else { return .terminateNow }
+
+        // If all processes are already dead, no need to wait
+        if sessionManager.allProcessesTerminated {
+            return .terminateNow
+        }
+
+        isQuitting = true
+        sessionManager.terminateAllProcesses()
+
+        // Use DispatchQueue for polling — Timer may not fire during termination
+        // because the run loop can be in a non-default mode.
+        let startTime = Date()
+        pollForTermination(sessionManager: sessionManager, startTime: startTime)
+
+        return .terminateLater
+    }
+
+    private func pollForTermination(sessionManager: SessionManager, startTime: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            let allDead = sessionManager.allProcessesTerminated
+            let elapsed = Date().timeIntervalSince(startTime)
+
+            if allDead || elapsed >= 3.0 {
+                if !allDead {
+                    sessionManager.forceKillAllProcesses()
+                }
+                NSApp.reply(toApplicationShouldTerminate: true)
+            } else {
+                self?.pollForTermination(sessionManager: sessionManager, startTime: startTime)
+            }
         }
     }
 

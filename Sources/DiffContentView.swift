@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+import UserNotifications
 
 struct DiffContentView: View {
     let fileDiffs: [FileDiff]
@@ -15,6 +17,7 @@ struct DiffContentView: View {
     @State private var scrollTarget: UUID?
     @State private var activeCommentLineId: String? = nil
     @State private var localComments: [String: [SubmittedComment]] = [:]
+    @State private var showCommitSheet = false
 
     private var commentsBinding: Binding<[String: [SubmittedComment]]> {
         if let workspace {
@@ -41,7 +44,9 @@ struct DiffContentView: View {
                         try? await Task.sleep(for: .milliseconds(500))
                         await MainActor.run { switchTab?() }
                     }
-                } }
+                } },
+                hasChanges: workspace?.hasUncommittedChanges ?? false,
+                onCommit: workspace != nil ? { showCommitSheet = true } : nil
             )
 
             Divider()
@@ -70,6 +75,7 @@ struct DiffContentView: View {
                             files: computedFiles,
                             scrollTarget: $scrollTarget,
                             workspace: workspace,
+                            editor: appSettings.defaultEditor,
                             activeCommentLineId: $activeCommentLineId,
                             submittedComments: commentsBinding
                         )
@@ -78,6 +84,7 @@ struct DiffContentView: View {
                             files: computedFiles,
                             scrollTarget: $scrollTarget,
                             workspace: workspace,
+                            editor: appSettings.defaultEditor,
                             activeCommentLineId: $activeCommentLineId,
                             submittedComments: commentsBinding
                         )
@@ -97,6 +104,11 @@ struct DiffContentView: View {
             guard !didApplyDefault else { return }
             didApplyDefault = true
             viewMode = appSettings.defaultDiffMode
+        }
+        .sheet(isPresented: $showCommitSheet) {
+            if let workspace {
+                CommitSheet(session: workspace)
+            }
         }
     }
 
@@ -139,6 +151,8 @@ struct ComputedFileDiff: Identifiable {
 struct FileHeaderView: View {
     let fileName: String
     let changeType: FileChangeType
+    var workingDirectory: String? = nil
+    var editor: CodeEditor? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -154,6 +168,44 @@ struct FileHeaderView: View {
                 .foregroundStyle(.primary)
 
             Spacer()
+
+            if let dir = workingDirectory, let editor {
+                Menu {
+                    ForEach(CodeEditor.allCases) { ed in
+                        Button {
+                            let fullPath = (dir as NSString).appendingPathComponent(fileName)
+                            ed.open(file: fullPath)
+                        } label: {
+                            if let icon = ed.appIcon {
+                                Label {
+                                    Text(ed.rawValue)
+                                } icon: {
+                                    Image(nsImage: icon)
+                                }
+                            } else {
+                                Text(ed.rawValue)
+                            }
+                        }
+                    }
+                } label: {
+                    if let icon = editor.appIcon {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "app.dashed")
+                            .font(.system(size: 12))
+                    }
+                } primaryAction: {
+                    let fullPath = (dir as NSString).appendingPathComponent(fileName)
+                    editor.open(file: fullPath)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Open in \(editor.rawValue)")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -283,6 +335,7 @@ private struct UnifiedMultiFileView: View {
     let files: [ComputedFileDiff]
     @Binding var scrollTarget: UUID?
     var workspace: Session?
+    var editor: CodeEditor? = nil
     @Binding var activeCommentLineId: String?
     @Binding var submittedComments: [String: [SubmittedComment]]
 
@@ -292,7 +345,12 @@ private struct UnifiedMultiFileView: View {
                 ScrollView([.horizontal, .vertical]) {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(files) { file in
-                            FileHeaderView(fileName: file.fileName, changeType: file.changeType)
+                            FileHeaderView(
+                                fileName: file.fileName,
+                                changeType: file.changeType,
+                                workingDirectory: workspace?.workingDirectory,
+                                editor: editor
+                            )
                                 .frame(minWidth: geo.size.width, alignment: .leading)
                                 .id(file.id)
 
@@ -393,6 +451,7 @@ private struct SideBySideMultiFileView: View {
     let files: [ComputedFileDiff]
     @Binding var scrollTarget: UUID?
     var workspace: Session?
+    var editor: CodeEditor? = nil
     @Binding var activeCommentLineId: String?
     @Binding var submittedComments: [String: [SubmittedComment]]
 
@@ -401,7 +460,12 @@ private struct SideBySideMultiFileView: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(files) { file in
-                        FileHeaderView(fileName: file.fileName, changeType: file.changeType)
+                        FileHeaderView(
+                            fileName: file.fileName,
+                            changeType: file.changeType,
+                            workingDirectory: workspace?.workingDirectory,
+                            editor: editor
+                        )
                             .id(file.id)
 
                         SideBySideDiffView(
@@ -427,6 +491,179 @@ private struct SideBySideMultiFileView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+    }
+}
+
+// MARK: - Commit Sheet
+
+struct CommitSheet: View {
+    let session: Session
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var commitMessage = ""
+    @State private var hasRemote = false
+    @State private var isCommitting = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Commit to \(session.branchName)")
+                        .font(.headline)
+                    Text("\(session.uncommittedFiles.count) file\(session.uncommittedFiles.count == 1 ? "" : "s") changed")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            // File list
+            List(session.uncommittedFiles) { file in
+                CommitFileRow(file: file, workingDirectory: session.workingDirectory)
+            }
+            .listStyle(.bordered(alternatesRowBackgrounds: true))
+            .padding(.horizontal, 20)
+            .frame(minHeight: 80, maxHeight: 140)
+
+            // Commit message
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Commit message")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                TextField("Describe your changes...", text: $commitMessage, axis: .vertical)
+                    .lineLimit(3...6)
+                    .textFieldStyle(.plain)
+                    .padding(8)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+
+            if let errorMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(errorMessage)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.red)
+                        .lineLimit(3)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+            }
+
+            Spacer()
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+
+                Button(isCommitting ? "Committing..." : (hasRemote ? "Commit & Push" : "Commit")) {
+                    performCommit()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCommitting)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+        .frame(width: 480, height: 380)
+        .task {
+            hasRemote = await session.hasRemote()
+        }
+    }
+
+    private func performCommit() {
+        isCommitting = true
+        errorMessage = nil
+        let push = hasRemote
+        let message = commitMessage
+        Task {
+            do {
+                let output = try await session.commitAndPush(message: message, pushToRemote: push)
+                await MainActor.run {
+                    sendNotification(title: "Commit Successful", body: output)
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    isCommitting = false
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func sendNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        center.add(request)
+    }
+}
+
+// MARK: - Commit File Row
+
+private struct CommitFileRow: View {
+    let file: UncommittedFile
+    let workingDirectory: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(nsImage: fileIcon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 16, height: 16)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(file.fileName)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+
+                if let dir = file.directory {
+                    Text(dir)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            Text(file.statusLetter)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(file.statusColor)
+                .frame(width: 18, height: 18)
+                .background(file.statusColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+        }
+        .padding(.vertical, 1)
+    }
+
+    private var fileIcon: NSImage {
+        let fullPath = (workingDirectory as NSString).appendingPathComponent(file.path)
+        if FileManager.default.fileExists(atPath: fullPath) {
+            return NSWorkspace.shared.icon(forFile: fullPath)
+        }
+        let ext = (file.path as NSString).pathExtension
+        if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
+            return NSWorkspace.shared.icon(for: utType)
+        }
+        return NSWorkspace.shared.icon(for: .data)
     }
 }
 

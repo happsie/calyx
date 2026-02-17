@@ -4,6 +4,8 @@ struct ContentView: View {
     @State private var selection: SidebarSelection?
     @State private var showSplash = true
 
+    @Environment(AppDelegate.self) private var appDelegate
+
     var body: some View {
         NavigationSplitView {
             SidebarView(selection: $selection)
@@ -15,8 +17,33 @@ struct ContentView: View {
                 SplashOverlay(isPresented: $showSplash)
             }
         }
+        .overlay {
+            if appDelegate.isQuitting {
+                QuittingOverlay()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
             selection = .settings
+        }
+    }
+}
+
+// MARK: - Quitting Overlay
+
+private struct QuittingOverlay: View {
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Closing sessions...")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

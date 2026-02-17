@@ -194,6 +194,8 @@ class Session: Identifiable {
     var focusedPaneId: UUID?
     var fileDiffs: [FileDiff] = []
     var diffRevision: Int = 0
+    var hasUncommittedChanges: Bool = false
+    var uncommittedFiles: [UncommittedFile] = []
     var submittedComments: [String: [SubmittedComment]] = [:]
     var sentCommentHistory: [SentCommentBatch] = []
     var planText: String = ""
@@ -357,6 +359,54 @@ class Session: Identifiable {
         worktreePath.isEmpty ? projectPath : worktreePath
     }
 
+    // MARK: - Git Operations
+
+    func hasRemote() async -> Bool {
+        let dir = workingDirectory
+        guard !dir.isEmpty else { return false }
+        return await Task.detached {
+            let result = runGit(["remote"], in: dir)
+            return result.success && !result.output.isEmpty
+        }.value
+    }
+
+    func commitAndPush(message: String, pushToRemote: Bool) async throws -> String {
+        let dir = workingDirectory
+        guard !dir.isEmpty else { throw GitError.noWorkingDirectory }
+
+        return try await Task.detached {
+            // Stage all changes
+            let addResult = runGit(["add", "-A"], in: dir)
+            guard addResult.success else {
+                throw GitError.commandFailed("git add: \(addResult.output)")
+            }
+
+            // Commit
+            let commitResult = runGit(["commit", "-m", message], in: dir)
+            guard commitResult.success else {
+                throw GitError.commandFailed("git commit: \(commitResult.output)")
+            }
+
+            // Push if requested
+            if pushToRemote {
+                let pushResult = runGit(["push"], in: dir)
+                guard pushResult.success else {
+                    // Commit succeeded but push failed — try push with --set-upstream
+                    let branch = runGit(["branch", "--show-current"], in: dir)
+                    let branchName = branch.success ? branch.output : "HEAD"
+                    let retryResult = runGit(["push", "--set-upstream", "origin", branchName], in: dir)
+                    guard retryResult.success else {
+                        throw GitError.commandFailed("git push: \(retryResult.output)")
+                    }
+                    return "Committed and pushed (set upstream)"
+                }
+                return "Committed and pushed"
+            }
+
+            return "Committed: \(commitResult.output)"
+        }.value
+    }
+
     // MARK: - Diff Polling
 
     func startDiffPolling() {
@@ -367,24 +417,49 @@ class Session: Identifiable {
         diffPollTask?.cancel()
         diffPollTask = Task.detached { [weak self] in
             let diffBase = resolveDiffBase(base, in: dir)
-            var lastOutput = ""
+            var lastSignature = ""
 
             while !Task.isCancelled {
                 guard let self else { return }
 
-                // Use full diff output for change detection (name-status alone
-                // doesn't change when file content is edited further)
+                // Build a change signature from tracked diffs + untracked files.
+                // git diff alone misses untracked (new) files the AI creates.
                 let fullDiff = runGit(["diff", diffBase], in: dir)
+                let untracked = runGit(
+                    ["ls-files", "--others", "--exclude-standard"],
+                    in: dir
+                )
+                let signature = (fullDiff.output) + "\n--untracked--\n" + (untracked.output)
 
-                if fullDiff.success && fullDiff.output != lastOutput {
-                    lastOutput = fullDiff.output
+                // Check for uncommitted changes (staged + unstaged + untracked)
+                let statusResult = runGit(["status", "--porcelain"], in: dir)
+                let uncommitted = statusResult.success && !statusResult.output.isEmpty
+                let parsedFiles = statusResult.success ? parseGitStatus(statusResult.output) : []
+
+                if signature != lastSignature {
+                    lastSignature = signature
                     let nameStatus = runGit(["diff", "--name-status", diffBase], in: dir)
-                    let diffs = nameStatus.success
+                    var allDiffs = nameStatus.success
                         ? parseDiffNameStatus(nameStatus.output, dir: dir, baseBranch: diffBase)
                         : []
+
+                    // Include untracked (new) files as Added diffs
+                    if untracked.success {
+                        let untrackedDiffs = parseUntrackedFiles(untracked.output, dir: dir)
+                        allDiffs.append(contentsOf: untrackedDiffs)
+                    }
+
+                    let finalDiffs = allDiffs
                     await MainActor.run {
-                        self.fileDiffs = diffs
+                        self.fileDiffs = finalDiffs
                         self.diffRevision += 1
+                        self.hasUncommittedChanges = uncommitted
+                        self.uncommittedFiles = parsedFiles
+                    }
+                } else if self.hasUncommittedChanges != uncommitted {
+                    await MainActor.run {
+                        self.hasUncommittedChanges = uncommitted
+                        self.uncommittedFiles = parsedFiles
                     }
                 }
 
@@ -638,9 +713,77 @@ class Session: Identifiable {
     }
 }
 
+struct UncommittedFile: Identifiable {
+    let id: String // the file path
+    let status: String // e.g. "M", "A", "D", "??"
+    let path: String
+
+    var fileName: String {
+        (path as NSString).lastPathComponent
+    }
+
+    var directory: String? {
+        let dir = (path as NSString).deletingLastPathComponent
+        return dir.isEmpty ? nil : dir
+    }
+
+    var statusLabel: String {
+        switch status {
+        case "M": "Modified"
+        case "A": "Added"
+        case "D": "Deleted"
+        case "R": "Renamed"
+        case "??": "Untracked"
+        default: status
+        }
+    }
+
+    var statusLetter: String {
+        switch status {
+        case "??": "U"
+        default: String(status.prefix(1))
+        }
+    }
+
+    var statusColor: SwiftUI.Color {
+        switch status {
+        case "M": Color(nsColor: .init(red: 0.85, green: 0.75, blue: 0.45, alpha: 1))
+        case "A": Color(nsColor: .init(red: 0.45, green: 0.80, blue: 0.50, alpha: 1))
+        case "D": Color(nsColor: .init(red: 0.90, green: 0.45, blue: 0.42, alpha: 1))
+        case "??": Color(nsColor: .init(red: 0.45, green: 0.80, blue: 0.50, alpha: 1))
+        default: .secondary
+        }
+    }
+}
+
+private func parseGitStatus(_ output: String) -> [UncommittedFile] {
+    guard !output.isEmpty else { return [] }
+    var files: [UncommittedFile] = []
+    for line in output.split(separator: "\n") {
+        guard line.count >= 4 else { continue }
+        let statusPart = String(line.prefix(2)).trimmingCharacters(in: .whitespaces)
+        let filePath = String(line.dropFirst(3))
+        let status = statusPart.isEmpty ? "?" : statusPart
+        files.append(UncommittedFile(id: filePath, status: status, path: filePath))
+    }
+    return files
+}
+
 private struct GitResult {
     let success: Bool
     let output: String
+}
+
+enum GitError: LocalizedError {
+    case noWorkingDirectory
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noWorkingDirectory: "No working directory"
+        case .commandFailed(let msg): msg
+        }
+    }
 }
 
 /// Find the best ref to diff against. Tries: the branch name as-is, origin/<branch>, then HEAD.
@@ -702,6 +845,24 @@ private func parseDiffNameStatus(_ output: String, dir: String, baseBranch: Stri
         diffs.append(FileDiff(fileName: fileName, changeType: changeType, oldText: oldText, newText: newText))
     }
 
+    return diffs
+}
+
+private func parseUntrackedFiles(_ output: String, dir: String) -> [FileDiff] {
+    guard !output.isEmpty else { return [] }
+
+    var diffs: [FileDiff] = []
+    for line in output.split(separator: "\n") {
+        let fileName = String(line)
+        guard !fileName.isEmpty else { continue }
+
+        let filePath = (dir as NSString).appendingPathComponent(fileName)
+        let newText = (try? String(contentsOfFile: filePath, encoding: .utf8)) ?? ""
+        // Skip binary files (failed to read as UTF-8)
+        guard !newText.isEmpty else { continue }
+
+        diffs.append(FileDiff(fileName: fileName, changeType: .added, oldText: "", newText: newText))
+    }
     return diffs
 }
 
@@ -947,6 +1108,45 @@ class SessionManager {
 
     private static var backupURL: URL {
         storageURL.deletingLastPathComponent().appendingPathComponent("sessions.backup.json")
+    }
+
+    /// Terminate all running terminal processes across all sessions.
+    /// Sends SIGTERM to each process group so child processes (agents) also die.
+    func terminateAllProcesses() {
+        for session in sessions {
+            for pane in session.terminalPanes {
+                let pid = pane.terminalView.process.shellPid
+                if pid > 0 {
+                    // Negative PID sends signal to entire process group
+                    kill(-pid, SIGTERM)
+                }
+                pane.terminalView.terminate()
+            }
+        }
+    }
+
+    /// Whether all terminal processes across all sessions have exited.
+    var allProcessesTerminated: Bool {
+        for session in sessions {
+            for pane in session.terminalPanes {
+                if pane.terminalView.process.running {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    /// Send SIGKILL to any remaining processes (timeout fallback).
+    func forceKillAllProcesses() {
+        for session in sessions {
+            for pane in session.terminalPanes {
+                let pid = pane.terminalView.process.shellPid
+                if pid > 0 && pane.terminalView.process.running {
+                    kill(-pid, SIGKILL)
+                }
+            }
+        }
     }
 
     func save() {

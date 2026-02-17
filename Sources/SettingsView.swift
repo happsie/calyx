@@ -82,6 +82,20 @@ enum CodeEditor: String, CaseIterable, Codable, Identifiable {
         process.standardError = FileHandle.nullDevice
         try? process.run()
     }
+
+    func open(file: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        switch self {
+        case .vscode:
+            process.arguments = [cliCommand, "--goto", file]
+        case .intellij, .zed:
+            process.arguments = [cliCommand, file]
+        }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+    }
 }
 
 // MARK: - App Settings

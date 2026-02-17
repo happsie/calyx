@@ -12,26 +12,39 @@ struct SidebarView: View {
     @State private var sessionToDelete: Session?
     @State private var alsoRemoveWorktree = false
 
+    private var sessionsByProject: [(path: String, sessions: [Session])] {
+        Dictionary(grouping: manager.sessions) { $0.projectPath }
+            .sorted { $0.key < $1.key }
+            .map { (path: $0.key, sessions: $0.value) }
+    }
+
+    private func projectDisplayName(_ path: String) -> String {
+        guard !path.isEmpty else { return "No Project" }
+        return (path as NSString).lastPathComponent
+    }
+
     var body: some View {
         List(selection: $selection) {
-            Section("Sessions") {
-                ForEach(manager.sessions) { session in
-                    SessionSidebarRow(session: session)
-                        .tag(SidebarSelection.session(session.id))
-                        .contextMenu {
-                            Button {
-                                sessionToDelete = session
-                            } label: {
-                                Label("Delete Session…", systemImage: "trash")
+            ForEach(sessionsByProject, id: \.path) { group in
+                Section(projectDisplayName(group.path)) {
+                    ForEach(group.sessions) { session in
+                        SessionSidebarRow(session: session)
+                            .tag(SidebarSelection.session(session.id))
+                            .contextMenu {
+                                Button {
+                                    sessionToDelete = session
+                                } label: {
+                                    Label("Delete Session…", systemImage: "trash")
+                                }
                             }
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                sessionToDelete = session
-                            } label: {
-                                Label("Delete", systemImage: "trash")
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    sessionToDelete = session
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
                             }
-                        }
+                    }
                 }
             }
         }
