@@ -45,8 +45,8 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
     var dangerousFlag: String? {
         switch self {
         case .claude: "--dangerously-skip-permissions"
-        case .copilot: "--dangerously-skip-permissions"
-        case .gemini: "-y"
+        case .copilot: "--yolo"
+        case .gemini: "--yolo"
         }
     }
 }
