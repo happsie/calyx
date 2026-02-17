@@ -1081,6 +1081,7 @@ private func termColor(_ r: UInt16, _ g: UInt16, _ b: UInt16) -> SwiftTerm.Color
 @Observable
 class SessionManager {
     var sessions: [Session] = []
+    private var terminationPids: [pid_t] = []
 
     private static var storageURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -1112,40 +1113,45 @@ class SessionManager {
 
     /// Terminate all running terminal processes across all sessions.
     /// Sends SIGTERM to each process group so child processes (agents) also die.
+    /// Collects PIDs/PGIDs upfront before calling terminate(), since terminate()
+    /// may clear childfd before we can read it.
     func terminateAllProcesses() {
+        terminationPids = []
         for session in sessions {
             for pane in session.terminalPanes {
-                let pid = pane.terminalView.process.shellPid
+                let process = pane.terminalView.process!
+                let pid = process.shellPid
+
                 if pid > 0 {
-                    // Negative PID sends signal to entire process group
+                    // forkpty path — PID is known, kill the process group
                     kill(-pid, SIGTERM)
+                    terminationPids.append(pid)
+                } else if process.childfd >= 0 {
+                    // Subprocess path (Swift 6+) — shellPid is 0, but we have the PTY fd.
+                    // Get the foreground process group from the terminal.
+                    let pgid = tcgetpgrp(process.childfd)
+                    if pgid > 0 {
+                        kill(-pgid, SIGTERM)
+                        terminationPids.append(pgid)
+                    }
                 }
+
                 pane.terminalView.terminate()
             }
         }
     }
 
     /// Whether all terminal processes across all sessions have exited.
+    /// Uses kill(pid, 0) to check if processes are genuinely dead, rather than
+    /// relying on SwiftTerm's `running` flag which is set immediately by terminate().
     var allProcessesTerminated: Bool {
-        for session in sessions {
-            for pane in session.terminalPanes {
-                if pane.terminalView.process.running {
-                    return false
-                }
-            }
-        }
-        return true
+        terminationPids.allSatisfy { kill($0, 0) != 0 }
     }
 
     /// Send SIGKILL to any remaining processes (timeout fallback).
     func forceKillAllProcesses() {
-        for session in sessions {
-            for pane in session.terminalPanes {
-                let pid = pane.terminalView.process.shellPid
-                if pid > 0 && pane.terminalView.process.running {
-                    kill(-pid, SIGKILL)
-                }
-            }
+        for pid in terminationPids where kill(pid, 0) == 0 {
+            kill(-pid, SIGKILL)
         }
     }
 
