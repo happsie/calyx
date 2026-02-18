@@ -1237,8 +1237,11 @@ class ProjectStore {
     }
 
     init() {
-        let stored = UserDefaults.standard.stringArray(forKey: ProjectStore.key) ?? []
-        self.recentPaths = stored.filter { FileManager.default.fileExists(atPath: $0) }
+        self.recentPaths = UserDefaults.standard.stringArray(forKey: ProjectStore.key) ?? []
+    }
+
+    func isAvailable(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path)
     }
 
     func addPath(_ path: String) {

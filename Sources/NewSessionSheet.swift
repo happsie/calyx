@@ -134,7 +134,7 @@ struct NewSessionSheet: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 600, height: 420)
     }
 
     // MARK: - Step Dot
@@ -199,7 +199,8 @@ struct NewSessionSheet: View {
     }
 
     private func projectRow(path: String) -> some View {
-        let isSelected = selectedProjectPath == path
+        let available = projectStore.isAvailable(path)
+        let isSelected = selectedProjectPath == path && available
 
         return HStack(spacing: 10) {
             Image(systemName: "folder.fill")
@@ -218,6 +219,12 @@ struct NewSessionSheet: View {
             }
 
             Spacer(minLength: 0)
+
+            if !available {
+                Text("Unavailable")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
 
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
@@ -238,8 +245,11 @@ struct NewSessionSheet: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
         .background(isSelected ? Color.accentColor.opacity(0.1) : .clear)
+        .opacity(available ? 1.0 : 0.5)
         .contentShape(Rectangle())
-        .onTapGesture { selectedProjectPath = path }
+        .onTapGesture {
+            if available { selectedProjectPath = path }
+        }
     }
 
     // MARK: - Step 2: Details
@@ -284,7 +294,7 @@ struct NewSessionSheet: View {
 
             // Coding Agent
             fieldSection("Coding Agent") {
-                HStack(spacing: 12) {
+                FlowLayout(spacing: 8) {
                     ForEach(CodingAgent.allCases) { a in
                         agentRadioButton(a)
                     }
@@ -499,5 +509,54 @@ struct NewSessionSheet: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+}
+
+// MARK: - Flow Layout
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = computeRows(proposal: proposal, subviews: subviews)
+        var height: CGFloat = 0
+        for (i, row) in rows.enumerated() {
+            let rowHeight = row.map { subviews[$0].sizeThatFits(.unspecified).height }.max() ?? 0
+            height += rowHeight + (i > 0 ? spacing : 0)
+        }
+        return CGSize(width: proposal.width ?? 0, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = computeRows(proposal: proposal, subviews: subviews)
+        var y = bounds.minY
+        for (i, row) in rows.enumerated() {
+            let rowHeight = row.map { subviews[$0].sizeThatFits(.unspecified).height }.max() ?? 0
+            if i > 0 { y += spacing }
+            var x = bounds.minX
+            for index in row {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += rowHeight
+        }
+    }
+
+    private func computeRows(proposal: ProposedViewSize, subviews: Subviews) -> [[Int]] {
+        let maxWidth = proposal.width ?? .infinity
+        var rows: [[Int]] = [[]]
+        var currentWidth: CGFloat = 0
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if !rows[rows.count - 1].isEmpty && currentWidth + spacing + size.width > maxWidth {
+                rows.append([])
+                currentWidth = 0
+            }
+            if !rows[rows.count - 1].isEmpty { currentWidth += spacing }
+            rows[rows.count - 1].append(index)
+            currentWidth += size.width
+        }
+        return rows
     }
 }
