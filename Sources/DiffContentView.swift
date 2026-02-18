@@ -39,11 +39,7 @@ struct DiffContentView: View {
                 sentCommentHistory: workspace?.sentCommentHistory ?? [],
                 onSendAllComments: workspace.map { ws in {
                     ws.sendAllComments()
-                    let switchTab = onSwitchToAgent
-                    Task {
-                        try? await Task.sleep(for: .milliseconds(500))
-                        await MainActor.run { switchTab?() }
-                    }
+                    onSwitchToAgent?()
                 } },
                 hasChanges: workspace?.hasUncommittedChanges ?? false,
                 onCommit: workspace != nil ? { showCommitSheet = true } : nil

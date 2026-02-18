@@ -327,8 +327,12 @@ class Session: Identifiable {
             message += "\(comment.commentText)\n\n"
         }
 
-        sendToTerminal(message)
-        terminalView.send(EscapeSequences.cmdRet)
+        // Use bracketed paste so newlines aren't interpreted as submit
+        let terminal = terminalView
+        terminal.send(data: EscapeSequences.bracketedPasteStart[0...])
+        terminal.send(txt: message)
+        terminal.send(data: EscapeSequences.bracketedPasteEnd[0...])
+        terminal.send(EscapeSequences.cmdRet)
 
         let batch = SentCommentBatch(comments: allComments)
         sentCommentHistory.append(batch)
