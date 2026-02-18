@@ -7,6 +7,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
     case claude = "Claude"
     case gemini = "Gemini"
     case copilot = "Copilot"
+    case opencode = "OpenCode"
 
     var id: String { rawValue }
 
@@ -15,6 +16,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
         case .claude: "claude"
         case .gemini: "gemini"
         case .copilot: "copilot"
+        case .opencode: "opencode"
         }
     }
 
@@ -23,6 +25,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
         case .claude: "c.circle.fill"
         case .gemini: "g.circle.fill"
         case .copilot: "cp.circle.fill"
+        case .opencode: "o.circle.fill"
         }
     }
 
@@ -31,6 +34,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
         case .claude: .orange
         case .gemini: .blue
         case .copilot: .purple
+        case .opencode: .green
         }
     }
 
@@ -39,6 +43,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
         case .claude: "CL"
         case .gemini: "GM"
         case .copilot: "CP"
+        case .opencode: "OC"
         }
     }
 
@@ -47,6 +52,7 @@ enum CodingAgent: String, CaseIterable, Identifiable, Codable {
         case .claude: "--dangerously-skip-permissions"
         case .copilot: "--yolo"
         case .gemini: "--yolo"
+        case .opencode: nil
         }
     }
 }
@@ -621,6 +627,8 @@ class Session: Identifiable {
                 }
             case .gemini:
                 break
+            case .opencode:
+                break
             }
 
             args = ["-l", "-c", agentCommand]
@@ -931,6 +939,8 @@ private func discoverPlanFiles(agent: CodingAgent, worktreeDir: String, sessionI
         return discoverCopilotPlans(sessionId: sessionId)
     case .gemini:
         return []  // Gemini keeps todos in-memory only
+    case .opencode:
+        return []
     }
 }
 
