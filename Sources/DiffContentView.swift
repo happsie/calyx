@@ -42,7 +42,8 @@ struct DiffContentView: View {
                     onSwitchToAgent?()
                 } },
                 hasChanges: workspace?.hasUncommittedChanges ?? false,
-                onCommit: workspace != nil ? { showCommitSheet = true } : nil
+                onCommit: workspace != nil ? { showCommitSheet = true } : nil,
+                onRefresh: workspace.map { ws in { ws.refreshDiffs() } }
             )
 
             Divider()
@@ -114,11 +115,41 @@ struct DiffContentView: View {
             fileDiffs.map { file in
                 let lines = DiffComputer.computeDiff(old: file.oldText, new: file.newText)
                 let highlighter = DiffSyntaxHighlighter(language: file.language, isDark: isDark)
+
+                // Pre-compute highlighted AttributedStrings for each line
+                let highlighted: [AttributedString] = lines.map { line in
+                    let nsAttr = highlighter.highlight(line: line.content)
+                    let withDiff = highlighter.applyDiffBackground(
+                        nsAttr,
+                        lineType: line.type,
+                        inlineChanges: line.inlineChanges
+                    )
+                    return (try? AttributedString(withDiff, including: \.appKit)) ?? AttributedString(line.content)
+                }
+
+                // Pre-compute file stats
+                var added = 0
+                var removed = 0
+                for line in lines {
+                    switch line.type {
+                    case .added: added += 1
+                    case .removed: removed += 1
+                    case .unchanged: break
+                    }
+                }
+
+                // Pre-compute side-by-side pairs
+                let pairs = buildSideBySidePairs(lines: lines, highlighter: highlighter)
+
                 return ComputedFileDiff(
                     fileName: file.fileName,
                     changeType: file.changeType,
                     diffLines: lines,
-                    highlighter: highlighter
+                    highlighter: highlighter,
+                    highlightedLines: highlighted,
+                    addedCount: added,
+                    removedCount: removed,
+                    sideBySidePairs: pairs
                 )
             }
         }.value
@@ -127,6 +158,45 @@ struct DiffContentView: View {
             self.computedFiles = results
         }
     }
+
+}
+
+private func buildSideBySidePairs(lines: [DiffLine], highlighter: DiffSyntaxHighlighter) -> [SideBySidePair] {
+    func highlight(_ line: DiffLine, lineType: DiffLineType) -> AttributedString {
+        let nsAttr = highlighter.highlight(line: line.content)
+        let withDiff = highlighter.applyDiffBackground(nsAttr, lineType: lineType, inlineChanges: line.inlineChanges)
+        return (try? AttributedString(withDiff, including: \.appKit)) ?? AttributedString(line.content)
+    }
+
+    var pairs: [SideBySidePair] = []
+    var i = 0
+    while i < lines.count {
+        let line = lines[i]
+        switch line.type {
+        case .unchanged:
+            let h = highlight(line, lineType: .unchanged)
+            pairs.append(SideBySidePair(left: line, right: line, leftType: .unchanged, rightType: .unchanged, leftHighlighted: h, rightHighlighted: h))
+            i += 1
+        case .removed:
+            if i + 1 < lines.count, lines[i + 1].type == .added {
+                let next = lines[i + 1]
+                pairs.append(SideBySidePair(
+                    left: line, right: next,
+                    leftType: .removed, rightType: .added,
+                    leftHighlighted: highlight(line, lineType: .removed),
+                    rightHighlighted: highlight(next, lineType: .added)
+                ))
+                i += 2
+            } else {
+                pairs.append(SideBySidePair(left: line, right: nil, leftType: .removed, rightType: .unchanged, leftHighlighted: highlight(line, lineType: .removed), rightHighlighted: nil))
+                i += 1
+            }
+        case .added:
+            pairs.append(SideBySidePair(left: nil, right: line, leftType: .unchanged, rightType: .added, leftHighlighted: nil, rightHighlighted: highlight(line, lineType: .added)))
+            i += 1
+        }
+    }
+    return pairs
 }
 
 private struct DiffComputeKey: Equatable {
@@ -140,6 +210,20 @@ struct ComputedFileDiff: Identifiable {
     let changeType: FileChangeType
     let diffLines: [DiffLine]
     let highlighter: DiffSyntaxHighlighter
+    let highlightedLines: [AttributedString]
+    let addedCount: Int
+    let removedCount: Int
+    /// Pre-computed side-by-side pairs for the side-by-side view.
+    let sideBySidePairs: [SideBySidePair]
+}
+
+struct SideBySidePair {
+    let left: DiffLine?
+    let right: DiffLine?
+    let leftType: DiffLineType
+    let rightType: DiffLineType
+    let leftHighlighted: AttributedString?
+    let rightHighlighted: AttributedString?
 }
 
 // MARK: - File Header
@@ -244,7 +328,7 @@ private struct DiffFileList: View {
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(files) { file in
                         DiffFileListRow(file: file, isActive: scrollTarget == file.id)
                             .onTapGesture {
@@ -316,11 +400,9 @@ private struct DiffFileListRow: View {
     }
 
     private var changeLabel: String {
-        let added = file.diffLines.filter { $0.type == .added }.count
-        let removed = file.diffLines.filter { $0.type == .removed }.count
         var parts: [String] = []
-        if added > 0 { parts.append("+\(added)") }
-        if removed > 0 { parts.append("-\(removed)") }
+        if file.addedCount > 0 { parts.append("+\(file.addedCount)") }
+        if file.removedCount > 0 { parts.append("-\(file.removedCount)") }
         return parts.joined(separator: " ")
     }
 }
@@ -339,7 +421,7 @@ private struct UnifiedMultiFileView: View {
         GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView([.horizontal, .vertical]) {
-                    VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(files) { file in
                             FileHeaderView(
                                 fileName: file.fileName,
@@ -353,17 +435,27 @@ private struct UnifiedMultiFileView: View {
                             ForEach(Array(file.diffLines.enumerated()), id: \.offset) { idx, line in
                                 let lineId = "\(file.fileName):\(idx)"
                                 let displayLineNumber = line.newLineNumber ?? line.oldLineNumber ?? idx
+                                let highlighted = idx < file.highlightedLines.count ? file.highlightedLines[idx] : AttributedString(line.content)
 
-                                CommentableDiffLineView(
-                                    line: line,
-                                    highlighter: file.highlighter,
-                                    lineId: lineId,
-                                    fileName: file.fileName,
-                                    displayLineNumber: displayLineNumber,
-                                    workspace: workspace,
-                                    activeCommentLineId: $activeCommentLineId,
-                                    submittedComments: $submittedComments
-                                )
+                                VStack(alignment: .leading, spacing: 0) {
+                                    UnifiedDiffLineView(line: line, highlightedContent: highlighted)
+                                        .onTapGesture {
+                                            if workspace != nil {
+                                                activeCommentLineId = lineId
+                                            }
+                                        }
+
+                                    if activeCommentLineId == lineId || submittedComments[lineId] != nil {
+                                        CommentListView(
+                                            lineId: lineId,
+                                            fileName: file.fileName,
+                                            lineNumber: displayLineNumber,
+                                            lineContent: line.content,
+                                            activeCommentLineId: $activeCommentLineId,
+                                            submittedComments: $submittedComments
+                                        )
+                                    }
+                                }
                                 .frame(minWidth: geo.size.width, alignment: .leading)
                             }
 
@@ -387,60 +479,6 @@ private struct UnifiedMultiFileView: View {
     }
 }
 
-/// Wraps a UnifiedDiffLineView with hover comment button and inline comment UI.
-private struct CommentableDiffLineView: View {
-    let line: DiffLine
-    let highlighter: DiffSyntaxHighlighter
-    let lineId: String
-    let fileName: String
-    let displayLineNumber: Int
-    var workspace: Session?
-    @Binding var activeCommentLineId: String?
-    @Binding var submittedComments: [String: [SubmittedComment]]
-
-    @State private var isHovering = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            UnifiedDiffLineView(line: line, highlighter: highlighter)
-                .overlay(alignment: .leading) {
-                    if workspace != nil && isHovering {
-                        addCommentButton
-                    }
-                }
-                .onHover { isHovering = $0 }
-                .onTapGesture {
-                    if workspace != nil {
-                        activeCommentLineId = lineId
-                    }
-                }
-
-            CommentListView(
-                lineId: lineId,
-                fileName: fileName,
-                lineNumber: displayLineNumber,
-                lineContent: line.content,
-                activeCommentLineId: $activeCommentLineId,
-                submittedComments: $submittedComments
-            )
-        }
-    }
-
-    private var addCommentButton: some View {
-        Button { activeCommentLineId = lineId } label: {
-            Image(systemName: "plus.bubble")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 20, height: 20)
-                .background(.tint.opacity(0.6))
-                .clipShape(.rect(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 2)
-        .help("Add comment")
-    }
-}
-
 // MARK: - Multi-file Side-by-Side View
 
 private struct SideBySideMultiFileView: View {
@@ -454,7 +492,7 @@ private struct SideBySideMultiFileView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(files) { file in
                         FileHeaderView(
                             fileName: file.fileName,
@@ -465,8 +503,7 @@ private struct SideBySideMultiFileView: View {
                             .id(file.id)
 
                         SideBySideDiffView(
-                            diffLines: file.diffLines,
-                            highlighter: file.highlighter,
+                            pairs: file.sideBySidePairs,
                             fileName: file.fileName,
                             workspace: workspace,
                             activeCommentLineId: $activeCommentLineId,

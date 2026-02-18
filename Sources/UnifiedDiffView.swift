@@ -3,7 +3,7 @@ import AppKit
 
 struct UnifiedDiffLineView: View {
     let line: DiffLine
-    let highlighter: DiffSyntaxHighlighter
+    let highlightedContent: AttributedString
 
     var body: some View {
         HStack(spacing: 0) {
@@ -25,8 +25,8 @@ struct UnifiedDiffLineView: View {
                 .foregroundStyle(prefixColor)
                 .frame(width: 20, alignment: .center)
 
-            // Code content with syntax highlighting
-            Text(attributedContent)
+            // Code content with pre-computed syntax highlighting
+            Text(highlightedContent)
                 .font(.system(size: 13, design: .monospaced))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -56,15 +56,5 @@ struct UnifiedDiffLineView: View {
         case .removed: Color(nsColor: DiffSyntaxHighlighter.removedBg)
         case .unchanged: .clear
         }
-    }
-
-    private var attributedContent: AttributedString {
-        let nsAttr = highlighter.highlight(line: line.content)
-        let withDiff = highlighter.applyDiffBackground(
-            nsAttr,
-            lineType: line.type,
-            inlineChanges: line.inlineChanges
-        )
-        return (try? AttributedString(withDiff, including: \.appKit)) ?? AttributedString(line.content)
     }
 }

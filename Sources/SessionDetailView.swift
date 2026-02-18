@@ -238,9 +238,8 @@ struct SessionDetailView: View {
             }
         }
         .onChange(of: selectedTab, initial: true) { old, new in
-            if old == .diff { session.stopDiffPolling() }
             if old == .plan { session.stopPlanPolling() }
-            if new == .diff { session.startDiffPolling() }
+            if new == .diff { session.refreshDiffs() }
             if new == .plan { session.startPlanPolling() }
             if new == .agent {
                 DispatchQueue.main.async {
@@ -255,7 +254,6 @@ struct SessionDetailView: View {
             }
         }
         .onDisappear {
-            session.stopDiffPolling()
             session.stopPlanPolling()
         }
     }

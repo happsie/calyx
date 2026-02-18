@@ -8,6 +8,7 @@ struct DiffToolbar: View {
     var onSendAllComments: (() -> Void)? = nil
     var hasChanges: Bool = false
     var onCommit: (() -> Void)? = nil
+    var onRefresh: (() -> Void)? = nil
 
     @State private var showHistoryPopover = false
     @State private var showNothingToCommit = false
@@ -18,6 +19,18 @@ struct DiffToolbar: View {
                 Text("\(fileCount) file\(fileCount == 1 ? "" : "s") changed")
                     .font(.system(.body, design: .monospaced))
                     .foregroundStyle(.secondary)
+            }
+
+            if let onRefresh {
+                Button {
+                    onRefresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+                .help("Refresh diffs")
             }
 
             if let onCommit {

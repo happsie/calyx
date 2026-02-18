@@ -417,65 +417,54 @@ class Session: Identifiable {
         }.value
     }
 
-    // MARK: - Diff Polling
+    // MARK: - Diff Refresh
 
-    func startDiffPolling() {
+    /// Manually refresh diffs by running git commands once.
+    func refreshDiffs() {
         let dir = workingDirectory
         let base = baseBranch
         guard !dir.isEmpty else { return }
 
         diffPollTask?.cancel()
         diffPollTask = Task.detached { [weak self] in
+            guard let self else { return }
+
             let diffBase = resolveDiffBase(base, in: dir)
-            var lastSignature = ""
 
-            while !Task.isCancelled {
-                guard let self else { return }
+            let untracked = runGit(
+                ["ls-files", "--others", "--exclude-standard"],
+                in: dir
+            )
 
-                // Build a change signature from tracked diffs + untracked files.
-                // git diff alone misses untracked (new) files the AI creates.
-                let fullDiff = runGit(["diff", diffBase], in: dir)
-                let untracked = runGit(
-                    ["ls-files", "--others", "--exclude-standard"],
-                    in: dir
-                )
-                let signature = (fullDiff.output) + "\n--untracked--\n" + (untracked.output)
+            // Check for uncommitted changes (staged + unstaged + untracked)
+            let statusResult = runGit(["status", "--porcelain"], in: dir)
+            let uncommitted = statusResult.success && !statusResult.output.isEmpty
+            let parsedFiles = statusResult.success ? parseGitStatus(statusResult.output) : []
 
-                // Check for uncommitted changes (staged + unstaged + untracked)
-                let statusResult = runGit(["status", "--porcelain"], in: dir)
-                let uncommitted = statusResult.success && !statusResult.output.isEmpty
-                let parsedFiles = statusResult.success ? parseGitStatus(statusResult.output) : []
+            let nameStatus = runGit(["diff", "--name-status", diffBase], in: dir)
+            var allDiffs = nameStatus.success
+                ? parseDiffNameStatus(nameStatus.output, dir: dir, baseBranch: diffBase)
+                : []
 
-                if signature != lastSignature {
-                    lastSignature = signature
-                    let nameStatus = runGit(["diff", "--name-status", diffBase], in: dir)
-                    var allDiffs = nameStatus.success
-                        ? parseDiffNameStatus(nameStatus.output, dir: dir, baseBranch: diffBase)
-                        : []
+            // Include untracked (new) files as Added diffs
+            if untracked.success {
+                let untrackedDiffs = parseUntrackedFiles(untracked.output, dir: dir)
+                allDiffs.append(contentsOf: untrackedDiffs)
+            }
 
-                    // Include untracked (new) files as Added diffs
-                    if untracked.success {
-                        let untrackedDiffs = parseUntrackedFiles(untracked.output, dir: dir)
-                        allDiffs.append(contentsOf: untrackedDiffs)
-                    }
-
-                    let finalDiffs = allDiffs
-                    await MainActor.run {
-                        self.fileDiffs = finalDiffs
-                        self.diffRevision += 1
-                        self.hasUncommittedChanges = uncommitted
-                        self.uncommittedFiles = parsedFiles
-                    }
-                } else if self.hasUncommittedChanges != uncommitted {
-                    await MainActor.run {
-                        self.hasUncommittedChanges = uncommitted
-                        self.uncommittedFiles = parsedFiles
-                    }
-                }
-
-                try? await Task.sleep(for: .seconds(5))
+            let finalDiffs = allDiffs
+            await MainActor.run {
+                self.fileDiffs = finalDiffs
+                self.diffRevision += 1
+                self.hasUncommittedChanges = uncommitted
+                self.uncommittedFiles = parsedFiles
             }
         }
+    }
+
+    /// Legacy API — now just calls refreshDiffs() once.
+    func startDiffPolling() {
+        refreshDiffs()
     }
 
     func stopDiffPolling() {
